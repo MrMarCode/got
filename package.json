@@ -10,10 +10,8 @@
 		"node": ">=10.19.0"
 	},
 	"scripts": {
-		"test": "xo && npm run build && nyc --reporter=html --reporter=text ava",
-		"release": "np",
-		"build": "del-cli dist && tsc",
-		"prepare": "npm run build"
+		"test": "xo && tsc && nyc --reporter=html --reporter=text ava",
+		"release": "np"
 	},
 	"files": [
 		"dist/source"
