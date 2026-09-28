@@ -48,6 +48,8 @@ const kJobs = Symbol('jobs');
 const kOriginalResponse = Symbol('originalResponse');
 const kRetryTimeout = Symbol('retryTimeout');
 exports.kIsNormalizedAlready = Symbol('isNormalizedAlready');
+const deferredEndErrorCodes = new Set(['ECANCELED', 'ERR_STREAM_DESTROYED', 'ERR_SOCKET_CLOSED']);
+const deferredEndErrorTimeout = 1000;
 const supportsBrotli = is_1.default.string(process.versions.brotli);
 exports.withoutBody = new Set(['GET', 'HEAD']);
 exports.knownHookEvents = [
@@ -1353,13 +1355,30 @@ class Request extends stream_1.Duplex {
                 callback();
                 return;
             }
-            this[kRequest].end((error) => {
-                if (!error) {
-                    this[kBodySize] = this[kUploadedSize];
-                    this.emit('uploadProgress', this.uploadProgress);
-                    this[kRequest].emit('upload-complete');
+            const request = this[kRequest];
+            request.end((error) => {
+                if (error) {
+                    // `ClientRequest.end()` can report the same failure as the request's `error` event. Route it through Got's retry handling without completing `_final`, so this Duplex does not finish a failed upload.
+                    // A destroyed socket reports `ECANCELED` or `ERR_SOCKET_CLOSED` here before the request's `error` event carries the retryable cause, and `close` always follows that event. The timeout settles requests whose socket never emits `close`; closing this stream first cancels it.
+                    if (deferredEndErrorCodes.has(error.code) && !request.closed) {
+                        const reportEndError = () => {
+                            clearTimeout(fallback);
+                            request.off('close', reportEndError);
+                            this.off('close', reportEndError);
+                            this._beforeError(error);
+                        };
+                        const fallback = setTimeout(reportEndError, deferredEndErrorTimeout);
+                        request.once('close', reportEndError);
+                        this.once('close', reportEndError);
+                        return;
+                    }
+                    this._beforeError(error);
+                    return;
                 }
-                callback(error);
+                this[kBodySize] = this[kUploadedSize];
+                this.emit('uploadProgress', this.uploadProgress);
+                request.emit('upload-complete');
+                callback();
             });
         };
         if (this.requestInitialized) {

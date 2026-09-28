@@ -55,6 +55,9 @@ const kOriginalResponse = Symbol('originalResponse');
 const kRetryTimeout = Symbol('retryTimeout');
 export const kIsNormalizedAlready = Symbol('isNormalizedAlready');
 
+const deferredEndErrorCodes = new Set(['ECANCELED', 'ERR_STREAM_DESTROYED', 'ERR_SOCKET_CLOSED']);
+const deferredEndErrorTimeout = 1000;
+
 const supportsBrotli = is.string((process.versions as any).brotli);
 
 export interface Agents {
@@ -2695,15 +2698,36 @@ export default class Request extends Duplex implements RequestEvents<Request> {
 				return;
 			}
 
-			this[kRequest]!.end((error?: Error | null) => {
-				if (!error) {
-					this[kBodySize] = this[kUploadedSize];
+			const request = this[kRequest]!;
 
-					this.emit('uploadProgress', this.uploadProgress);
-					this[kRequest]!.emit('upload-complete');
+			request.end((error?: NodeJS.ErrnoException | null) => {
+				if (error) {
+					// `ClientRequest.end()` can report the same failure as the request's `error` event. Route it through Got's retry handling without completing `_final`, so this Duplex does not finish a failed upload.
+					// A destroyed socket reports `ECANCELED` or `ERR_SOCKET_CLOSED` here before the request's `error` event carries the retryable cause, and `close` always follows that event. The timeout settles requests whose socket never emits `close`; closing this stream first cancels it.
+					if (deferredEndErrorCodes.has(error.code!) && !(request as ClientRequest & {closed?: boolean}).closed) {
+						const reportEndError = (): void => {
+							clearTimeout(fallback);
+							request.off('close', reportEndError);
+							this.off('close', reportEndError);
+							this._beforeError(error);
+						};
+
+						const fallback = setTimeout(reportEndError, deferredEndErrorTimeout);
+						request.once('close', reportEndError);
+						this.once('close', reportEndError);
+						return;
+					}
+
+					this._beforeError(error);
+					return;
 				}
 
-				callback(error);
+				this[kBodySize] = this[kUploadedSize];
+
+				this.emit('uploadProgress', this.uploadProgress);
+				request.emit('upload-complete');
+
+				callback();
 			});
 		};
 
